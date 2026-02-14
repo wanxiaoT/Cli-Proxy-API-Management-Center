@@ -1211,6 +1211,10 @@
   "codex_credentials": {
     "title": "Управление учётными данными Codex",
     "description": "Управляйте всеми учётными данными Codex API: статус, статистика и массовые операции.",
+    "stat_total": "Всего",
+    "stat_active": "Активно",
+    "stat_disabled": "Отключено",
+    "stat_total_success": "Всего успешных",
     "filter_all_prefix": "Все префиксы",
     "filter_all_status": "Все статусы",
     "filter_active": "Активно",

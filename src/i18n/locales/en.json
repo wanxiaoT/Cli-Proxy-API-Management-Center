@@ -1206,6 +1206,10 @@
   "codex_credentials": {
     "title": "Codex Credentials Management",
     "description": "Manage all Codex API credentials, view status, usage statistics, and batch operations.",
+    "stat_total": "Total",
+    "stat_active": "Active",
+    "stat_disabled": "Disabled",
+    "stat_total_success": "Total Success",
     "filter_all_prefix": "All Prefixes",
     "filter_all_status": "All Statuses",
     "filter_active": "Active",

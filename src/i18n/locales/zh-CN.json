@@ -1206,6 +1206,10 @@
   "codex_credentials": {
     "title": "Codex 凭证管理",
     "description": "管理所有 Codex API 凭证，查看状态、使用统计和批量操作。",
+    "stat_total": "总计",
+    "stat_active": "已启用",
+    "stat_disabled": "已禁用",
+    "stat_total_success": "总成功数",
     "filter_all_prefix": "所有前缀",
     "filter_all_status": "所有状态",
     "filter_active": "已启用",
