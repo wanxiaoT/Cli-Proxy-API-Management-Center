@@ -124,10 +124,10 @@ export function CodexCredentialsPage() {
             usageDetails.forEach((detail: UsageDetail) => {
                 const detailAuthIndex = detail.auth_index != null ? String(detail.auth_index).trim() : null;
                 if (detailAuthIndex === authIndexKey) {
-                    if (detail.status === 'success' || detail.status === 'ok') {
-                        success++;
-                    } else {
+                    if (detail.failed) {
                         failure++;
+                    } else {
+                        success++;
                     }
                 }
             });
