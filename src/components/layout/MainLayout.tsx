@@ -17,6 +17,7 @@ import {
   IconChartLine,
   IconFileText,
   IconInfo,
+  IconKey,
   IconLayoutDashboard,
   IconScrollText,
   IconSettings,
@@ -39,6 +40,7 @@ import { isSupportedLanguage } from '@/utils/language';
 const sidebarIcons: Record<string, ReactNode> = {
   dashboard: <IconLayoutDashboard size={18} />,
   aiProviders: <IconBot size={18} />,
+  codexCredentials: <IconKey size={18} />,
   authFiles: <IconFileText size={18} />,
   oauth: <IconShield size={18} />,
   quota: <IconTimer size={18} />,
@@ -352,6 +354,7 @@ export function MainLayout() {
     { path: '/', label: t('nav.dashboard'), icon: sidebarIcons.dashboard },
     { path: '/config', label: t('nav.config_management'), icon: sidebarIcons.config },
     { path: '/ai-providers', label: t('nav.ai_providers'), icon: sidebarIcons.aiProviders },
+    { path: '/codex-credentials', label: t('nav.codex_credentials'), icon: sidebarIcons.codexCredentials },
     { path: '/auth-files', label: t('nav.auth_files'), icon: sidebarIcons.authFiles },
     { path: '/oauth', label: t('nav.oauth', { defaultValue: 'OAuth' }), icon: sidebarIcons.oauth },
     { path: '/quota', label: t('nav.quota_management'), icon: sidebarIcons.quota },
