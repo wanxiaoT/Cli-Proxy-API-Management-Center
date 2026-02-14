@@ -1,9 +1,10 @@
 /**
  * Codex 凭证管理页面
- * - 凭证列表展示（状态/余额/使用量）
- * - 搜索和过滤（按前缀、状态、模型）
+ * 数据来源：认证文件 API（过滤 type === 'codex'）
+ * - 凭证列表展示（状态/大小/修改时间）
+ * - 搜索过滤
  * - 批量启用/禁用
- * - 使用统计图表
+ * - 使用统计（成功/失败）
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -24,126 +25,124 @@ import { ToggleSwitch } from '@/components/ui/ToggleSwitch';
 import { LoadingSpinner } from '@/components/ui/LoadingSpinner';
 import { IconSearch } from '@/components/ui/icons';
 import { useHeaderRefresh } from '@/hooks/useHeaderRefresh';
-import { providersApi } from '@/services/api';
+import { authFilesApi } from '@/services/api';
+import { usageApi } from '@/services/api';
 import {
     useAuthStore,
-    useConfigStore,
     useNotificationStore,
     useThemeStore,
 } from '@/stores';
-import { useProviderStats } from '@/components/providers/hooks/useProviderStats';
-import {
-    hasDisableAllModelsRule,
-    withDisableAllModelsRule,
-    withoutDisableAllModelsRule,
-    getStatsBySource,
-} from '@/components/providers/utils';
-import { maskApiKey } from '@/utils/format';
-import type { ProviderKeyConfig } from '@/types';
-import type { KeyStatBucket } from '@/utils/usage';
+import type { AuthFileItem } from '@/types';
+import type { KeyStats } from '@/utils/usage';
+import { collectUsageDetails, type UsageDetail } from '@/utils/usage';
+import { formatFileSize } from '@/utils/format';
 import styles from './CodexCredentialsPage.module.scss';
 
 ChartJS.register(CategoryScale, LinearScale, BarElement, Title, Tooltip, Legend);
 
 type StatusFilter = 'all' | 'active' | 'disabled';
 
-interface CredentialItem extends ProviderKeyConfig {
-    _index: number;
-    _disabled: boolean;
-    _stats: KeyStatBucket;
-}
-
 export function CodexCredentialsPage() {
     const { t } = useTranslation();
     const { showNotification } = useNotificationStore();
-    const resolvedTheme = useThemeStore((state) => state.resolvedTheme);
+    const resolvedTheme = useThemeStore((state: { resolvedTheme: string }) => state.resolvedTheme);
     const isDark = resolvedTheme === 'dark';
-    const connectionStatus = useAuthStore((state) => state.connectionStatus);
+    const connectionStatus = useAuthStore((state: { connectionStatus: string }) => state.connectionStatus);
     const disableControls = connectionStatus !== 'connected';
 
-    const fetchConfig = useConfigStore((state) => state.fetchConfig);
-    const updateConfigValue = useConfigStore((state) => state.updateConfigValue);
-    const clearCache = useConfigStore((state) => state.clearCache);
-    const config = useConfigStore((state) => state.config);
-
-    const [configs, setConfigs] = useState<ProviderKeyConfig[]>([]);
+    const [files, setFiles] = useState<AuthFileItem[]>([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
     const [saving, setSaving] = useState(false);
     const hasMounted = useRef(false);
 
+    // 使用统计
+    const [keyStats, setKeyStats] = useState<KeyStats>({ bySource: {}, byAuthIndex: {} });
+    const [usageDetails, setUsageDetails] = useState<UsageDetail[]>([]);
+
     // 搜索和过滤
     const [searchText, setSearchText] = useState('');
     const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
-    const [prefixFilter, setPrefixFilter] = useState('');
 
     // 批量选择
-    const [selectedKeys, setSelectedKeys] = useState<Set<number>>(new Set());
+    const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
 
-    // 使用统计
-    const { keyStats, loadKeyStats } = useProviderStats();
-
-    // 加载凭证列表
-    const loadConfigs = useCallback(async () => {
+    // 加载认证文件列表（只保留 codex 类型）
+    const loadFiles = useCallback(async () => {
         setLoading(true);
         setError('');
         try {
-            const data = await fetchConfig('codex-api-key');
-            const list = Array.isArray(data) ? (data as ProviderKeyConfig[]) : [];
-            setConfigs(list);
+            const data = await authFilesApi.list();
+            const allFiles = data?.files || [];
+            const codexFiles = allFiles.filter(
+                (f: AuthFileItem) => f.type === 'codex'
+            );
+            setFiles(codexFiles);
         } catch (err: unknown) {
             const msg = err instanceof Error ? err.message : t('notification.refresh_failed');
             setError(msg);
         } finally {
             setLoading(false);
         }
-    }, [fetchConfig, t]);
+    }, [t]);
+
+    // 加载使用统计
+    const loadKeyStats = useCallback(async () => {
+        try {
+            const usageResponse = await usageApi.getUsage();
+            const usageData = usageResponse?.usage ?? usageResponse;
+            const stats = await usageApi.getKeyStats(usageData);
+            setKeyStats(stats);
+            const details = collectUsageDetails(usageData);
+            setUsageDetails(details);
+        } catch {
+            // 静默失败
+        }
+    }, []);
 
     const handleRefresh = useCallback(async () => {
-        await Promise.all([loadConfigs(), loadKeyStats()]);
-    }, [loadConfigs, loadKeyStats]);
+        await Promise.all([loadFiles(), loadKeyStats()]);
+    }, [loadFiles, loadKeyStats]);
 
     useHeaderRefresh(handleRefresh);
 
     useEffect(() => {
         if (hasMounted.current) return;
         hasMounted.current = true;
-        void loadConfigs();
+        void loadFiles();
         void loadKeyStats();
-    }, [loadConfigs, loadKeyStats]);
+    }, [loadFiles, loadKeyStats]);
 
-    // 同步 config store 更新
-    useEffect(() => {
-        if (config?.codexApiKeys) {
-            setConfigs(config.codexApiKeys);
+    // 获取每个认证文件的使用统计
+    const getFileStats = useCallback((file: AuthFileItem) => {
+        const rawAuthIndex = file['auth_index'] ?? file.authIndex;
+        const authIndexKey = rawAuthIndex != null ? String(rawAuthIndex).trim() : null;
+        let success = 0;
+        let failure = 0;
+
+        if (authIndexKey) {
+            usageDetails.forEach((detail: UsageDetail) => {
+                const detailAuthIndex = detail.auth_index != null ? String(detail.auth_index).trim() : null;
+                if (detailAuthIndex === authIndexKey) {
+                    if (detail.status === 'success' || detail.status === 'ok') {
+                        success++;
+                    } else {
+                        failure++;
+                    }
+                }
+            });
         }
-    }, [config?.codexApiKeys]);
 
-    // 构建增强的凭证列表
-    const credentialItems: CredentialItem[] = useMemo(
-        () =>
-            configs.map((cfg, idx) => ({
-                ...cfg,
-                _index: idx,
-                _disabled: hasDisableAllModelsRule(cfg.excludedModels),
-                _stats: getStatsBySource(cfg.apiKey, keyStats, cfg.prefix),
-            })),
-        [configs, keyStats]
-    );
+        // 也尝试通过 bySource 匹配
+        const fileName = file.name.replace(/\.json$/, '');
+        const sourceStats = keyStats.bySource?.[fileName];
+        if (sourceStats) {
+            success += sourceStats.success || 0;
+            failure += sourceStats.failure || 0;
+        }
 
-    // 可用前缀列表
-    const prefixOptions = useMemo(() => {
-        const prefixes = new Set<string>();
-        configs.forEach((cfg) => {
-            if (cfg.prefix?.trim()) prefixes.add(cfg.prefix.trim());
-        });
-        return [
-            { value: '', label: t('codex_credentials.filter_all_prefix') },
-            ...Array.from(prefixes)
-                .sort()
-                .map((p) => ({ value: p, label: p })),
-        ];
-    }, [configs, t]);
+        return { success, failure };
+    }, [usageDetails, keyStats]);
 
     // 状态过滤选项
     const statusOptions = useMemo(
@@ -157,76 +156,59 @@ export function CodexCredentialsPage() {
 
     // 过滤后的凭证列表
     const filteredItems = useMemo(() => {
-        let items = credentialItems;
+        let items = files;
 
-        // 搜索（按 apiKey、baseUrl、prefix）
+        // 搜索（按名称）
         if (searchText.trim()) {
             const kw = searchText.trim().toLowerCase();
             items = items.filter(
-                (item) =>
-                    item.apiKey.toLowerCase().includes(kw) ||
-                    (item.baseUrl ?? '').toLowerCase().includes(kw) ||
-                    (item.prefix ?? '').toLowerCase().includes(kw)
+                (item: AuthFileItem) =>
+                    item.name.toLowerCase().includes(kw) ||
+                    (item.provider ?? '').toLowerCase().includes(kw)
             );
         }
 
         // 状态过滤
         if (statusFilter === 'active') {
-            items = items.filter((item) => !item._disabled);
+            items = items.filter((item: AuthFileItem) => !item.disabled);
         } else if (statusFilter === 'disabled') {
-            items = items.filter((item) => item._disabled);
-        }
-
-        // 前缀过滤
-        if (prefixFilter) {
-            items = items.filter((item) => item.prefix?.trim() === prefixFilter);
+            items = items.filter((item: AuthFileItem) => item.disabled === true);
         }
 
         return items;
-    }, [credentialItems, searchText, statusFilter, prefixFilter]);
+    }, [files, searchText, statusFilter]);
 
     // 统计数据
-    const totalCount = configs.length;
-    const activeCount = credentialItems.filter((c) => !c._disabled).length;
-    const disabledCount = credentialItems.filter((c) => c._disabled).length;
-    const totalSuccess = credentialItems.reduce((sum, c) => sum + c._stats.success, 0);
+    const totalCount = files.length;
+    const activeCount = files.filter((f: AuthFileItem) => !f.disabled).length;
+    const disabledCount = files.filter((f: AuthFileItem) => f.disabled === true).length;
+    const totalSuccess = files.reduce((sum: number, f: AuthFileItem) => sum + getFileStats(f).success, 0);
 
     // 切换启用/禁用
-    const toggleConfig = useCallback(
-        async (index: number, enabled: boolean) => {
+    const toggleFile = useCallback(
+        async (name: string, enabled: boolean) => {
             if (disableControls || saving) return;
             setSaving(true);
-            const previousList = configs;
-            const current = configs[index];
-            if (!current) {
-                setSaving(false);
-                return;
-            }
-            const nextExcluded = enabled
-                ? withoutDisableAllModelsRule(current.excludedModels)
-                : withDisableAllModelsRule(current.excludedModels);
-            const nextItem: ProviderKeyConfig = { ...current, excludedModels: nextExcluded };
-            const nextList = configs.map((item, idx) => (idx === index ? nextItem : item));
-            setConfigs(nextList);
-            updateConfigValue('codex-api-key', nextList);
-            clearCache('codex-api-key');
+            const previousFiles = files;
+            // 乐观更新
+            setFiles((prev: AuthFileItem[]) =>
+                prev.map((f: AuthFileItem) => (f.name === name ? { ...f, disabled: !enabled } : f))
+            );
             try {
-                await providersApi.saveCodexConfigs(nextList);
+                await authFilesApi.setStatus(name, !enabled);
                 showNotification(
                     enabled ? t('notification.config_enabled') : t('notification.config_disabled'),
                     'success'
                 );
             } catch (err: unknown) {
                 const msg = err instanceof Error ? err.message : '';
-                setConfigs(previousList);
-                updateConfigValue('codex-api-key', previousList);
-                clearCache('codex-api-key');
+                setFiles(previousFiles);
                 showNotification(`${t('notification.update_failed')}: ${msg}`, 'error');
             } finally {
                 setSaving(false);
             }
         },
-        [configs, clearCache, disableControls, saving, showNotification, t, updateConfigValue]
+        [files, disableControls, saving, showNotification, t]
     );
 
     // 批量启用/禁用
@@ -234,35 +216,37 @@ export function CodexCredentialsPage() {
         async (enabled: boolean) => {
             if (disableControls || saving || selectedKeys.size === 0) return;
             setSaving(true);
-            const previousList = configs;
-            const nextList = configs.map((item, idx) => {
-                if (!selectedKeys.has(idx)) return item;
-                const nextExcluded = enabled
-                    ? withoutDisableAllModelsRule(item.excludedModels)
-                    : withDisableAllModelsRule(item.excludedModels);
-                return { ...item, excludedModels: nextExcluded };
-            });
-            setConfigs(nextList);
-            updateConfigValue('codex-api-key', nextList);
-            clearCache('codex-api-key');
-            try {
-                await providersApi.saveCodexConfigs(nextList);
+            const previousFiles = files;
+            // 乐观更新
+            setFiles((prev: AuthFileItem[]) =>
+                prev.map((f: AuthFileItem) => (selectedKeys.has(f.name) ? { ...f, disabled: !enabled } : f))
+            );
+            let successCount = 0;
+            let failCount = 0;
+            for (const name of selectedKeys) {
+                try {
+                    await authFilesApi.setStatus(name, !enabled);
+                    successCount++;
+                } catch {
+                    failCount++;
+                }
+            }
+            if (failCount > 0) {
+                setFiles(previousFiles);
+                showNotification(
+                    t('codex_credentials.batch_partial', { success: successCount, fail: failCount }),
+                    'warning'
+                );
+            } else {
                 showNotification(
                     t('codex_credentials.batch_success', { count: selectedKeys.size }),
                     'success'
                 );
-                setSelectedKeys(new Set());
-            } catch (err: unknown) {
-                const msg = err instanceof Error ? err.message : '';
-                setConfigs(previousList);
-                updateConfigValue('codex-api-key', previousList);
-                clearCache('codex-api-key');
-                showNotification(`${t('notification.update_failed')}: ${msg}`, 'error');
-            } finally {
-                setSaving(false);
             }
+            setSelectedKeys(new Set());
+            setSaving(false);
         },
-        [configs, clearCache, disableControls, saving, selectedKeys, showNotification, t, updateConfigValue]
+        [files, disableControls, saving, selectedKeys, showNotification, t]
     );
 
     // 全选/反选
@@ -270,21 +254,27 @@ export function CodexCredentialsPage() {
         if (selectedKeys.size === filteredItems.length) {
             setSelectedKeys(new Set());
         } else {
-            setSelectedKeys(new Set(filteredItems.map((i) => i._index)));
+            setSelectedKeys(new Set(filteredItems.map((i: AuthFileItem) => i.name)));
         }
     }, [filteredItems, selectedKeys.size]);
 
-    const toggleSelect = useCallback((index: number) => {
-        setSelectedKeys((prev) => {
+    const toggleSelect = useCallback((name: string) => {
+        setSelectedKeys((prev: Set<string>) => {
             const next = new Set(prev);
-            if (next.has(index)) {
-                next.delete(index);
+            if (next.has(name)) {
+                next.delete(name);
             } else {
-                next.add(index);
+                next.add(name);
             }
             return next;
         });
     }, []);
+
+    // 格式化修改时间
+    const formatTime = (ts?: number) => {
+        if (!ts) return '-';
+        return new Date(ts).toLocaleString();
+    };
 
     // ===== 图表数据 =====
     const chartData = useMemo(() => {
@@ -292,11 +282,17 @@ export function CodexCredentialsPage() {
         const successData: number[] = [];
         const failureData: number[] = [];
 
-        credentialItems.forEach((item) => {
-            const label = item.prefix || maskApiKey(item.apiKey);
+        // 只展示前 20 个有数据的
+        const itemsWithStats = files
+            .map((f: AuthFileItem) => ({ file: f, stats: getFileStats(f) }))
+            .filter((item) => item.stats.success > 0 || item.stats.failure > 0)
+            .slice(0, 20);
+
+        itemsWithStats.forEach((item) => {
+            const label = item.file.name.replace(/\.json$/, '').slice(0, 20);
             labels.push(label);
-            successData.push(item._stats.success);
-            failureData.push(item._stats.failure);
+            successData.push(item.stats.success);
+            failureData.push(item.stats.failure);
         });
 
         return {
@@ -320,7 +316,7 @@ export function CodexCredentialsPage() {
                 },
             ],
         };
-    }, [credentialItems, isDark, t]);
+    }, [files, getFileStats, isDark, t]);
 
     const chartOptions = useMemo(
         () => ({
@@ -427,19 +423,6 @@ export function CodexCredentialsPage() {
                     />
                 </div>
 
-                {prefixOptions.length > 1 && (
-                    <div className={styles.filterGroup}>
-                        <span className={styles.filterLabel}>{t('codex_credentials.filter_prefix_label')}</span>
-                        <Select
-                            value={prefixFilter}
-                            options={prefixOptions}
-                            onChange={setPrefixFilter}
-                            fullWidth={false}
-                            ariaLabel={t('codex_credentials.filter_prefix_label')}
-                        />
-                    </div>
-                )}
-
                 <div className={styles.batchActions}>
                     {filteredItems.length > 0 && (
                         <Button
@@ -481,7 +464,7 @@ export function CodexCredentialsPage() {
             </div>
 
             {/* 凭证列表 */}
-            {loading && !configs.length ? (
+            {loading && !files.length ? (
                 <div className={styles.loadingOverlay}>
                     <LoadingSpinner size={24} />
                     <span>{t('common.loading')}</span>
@@ -489,29 +472,27 @@ export function CodexCredentialsPage() {
             ) : filteredItems.length === 0 ? (
                 <div className={styles.emptyState}>
                     <div className={styles.emptyTitle}>
-                        {configs.length === 0
+                        {files.length === 0
                             ? t('codex_credentials.empty_title')
                             : t('codex_credentials.filter_empty_title')}
                     </div>
                     <div className={styles.emptyDesc}>
-                        {configs.length === 0
+                        {files.length === 0
                             ? t('codex_credentials.empty_desc')
                             : t('codex_credentials.filter_empty_desc')}
                     </div>
                 </div>
             ) : (
                 <div className={styles.credentialGrid}>
-                    {filteredItems.map((item) => {
-                        const isSelected = selectedKeys.has(item._index);
-                        const excludedModels = (item.excludedModels ?? []).filter(
-                            (m) => m.trim() !== '*'
-                        );
+                    {filteredItems.map((item: AuthFileItem) => {
+                        const isSelected = selectedKeys.has(item.name);
+                        const stats = getFileStats(item);
                         return (
                             <div
-                                key={`codex-${item._index}`}
+                                key={item.name}
                                 className={[
                                     styles.credentialCard,
-                                    item._disabled ? styles.credentialCardDisabled : '',
+                                    item.disabled ? styles.credentialCardDisabled : '',
                                     isSelected ? styles.credentialCardSelected : '',
                                 ]
                                     .filter(Boolean)
@@ -523,70 +504,50 @@ export function CodexCredentialsPage() {
                                         type="checkbox"
                                         className={styles.cardCheckbox}
                                         checked={isSelected}
-                                        onChange={() => toggleSelect(item._index)}
+                                        onChange={() => toggleSelect(item.name)}
                                         aria-label={t('codex_credentials.select_credential')}
                                     />
-                                    <span className={styles.cardKey}>{maskApiKey(item.apiKey)}</span>
+                                    <span className={styles.cardKey} title={item.name}>
+                                        {item.name}
+                                    </span>
                                     <div className={styles.cardActions}>
                                         <span
-                                            className={`${styles.statusBadge} ${item._disabled ? styles.statusDisabled : styles.statusActive}`}
+                                            className={`${styles.statusBadge} ${item.disabled ? styles.statusDisabled : styles.statusActive}`}
                                         >
-                                            {item._disabled
+                                            {item.disabled
                                                 ? t('codex_credentials.status_disabled')
                                                 : t('codex_credentials.status_active')}
                                         </span>
                                         <ToggleSwitch
-                                            checked={!item._disabled}
-                                            onChange={(val) => void toggleConfig(item._index, val)}
+                                            checked={!item.disabled}
+                                            onChange={(val) => void toggleFile(item.name, val)}
                                             disabled={disableControls || saving}
-                                            ariaLabel={t('ai_providers.config_toggle_label')}
+                                            ariaLabel={t('codex_credentials.toggle_label')}
                                         />
                                     </div>
                                 </div>
 
                                 {/* 详细信息 */}
-                                {item.prefix && (
+                                {item.size != null && (
                                     <div className={styles.fieldRow}>
-                                        <span className={styles.fieldLabel}>{t('common.prefix')}:</span>
-                                        <span className={styles.fieldValue}>{item.prefix}</span>
+                                        <span className={styles.fieldLabel}>{t('codex_credentials.file_size')}:</span>
+                                        <span className={styles.fieldValue}>{formatFileSize(item.size)}</span>
                                     </div>
                                 )}
-                                {item.baseUrl && (
+                                {item.modified != null && (
                                     <div className={styles.fieldRow}>
-                                        <span className={styles.fieldLabel}>{t('common.base_url')}:</span>
-                                        <span className={styles.fieldValue}>{item.baseUrl}</span>
-                                    </div>
-                                )}
-                                {item.proxyUrl && (
-                                    <div className={styles.fieldRow}>
-                                        <span className={styles.fieldLabel}>{t('common.proxy_url')}:</span>
-                                        <span className={styles.fieldValue}>{item.proxyUrl}</span>
-                                    </div>
-                                )}
-
-                                {/* 排除模型 */}
-                                {excludedModels.length > 0 && (
-                                    <div className={styles.excludedSection}>
-                                        <div className={styles.excludedLabel}>
-                                            {t('ai_providers.excluded_models_count', { count: excludedModels.length })}
-                                        </div>
-                                        <div className={styles.modelTagList}>
-                                            {excludedModels.map((model) => (
-                                                <span key={model} className={styles.modelTag}>
-                                                    {model}
-                                                </span>
-                                            ))}
-                                        </div>
+                                        <span className={styles.fieldLabel}>{t('codex_credentials.modified_time')}:</span>
+                                        <span className={styles.fieldValue}>{formatTime(item.modified)}</span>
                                     </div>
                                 )}
 
                                 {/* 使用统计 */}
                                 <div className={styles.cardStats}>
                                     <span className={`${styles.statPill} ${styles.statPillSuccess}`}>
-                                        {t('codex_credentials.chart_success')}: {item._stats.success}
+                                        {t('codex_credentials.chart_success')}: {stats.success}
                                     </span>
                                     <span className={`${styles.statPill} ${styles.statPillFailure}`}>
-                                        {t('codex_credentials.chart_failure')}: {item._stats.failure}
+                                        {t('codex_credentials.chart_failure')}: {stats.failure}
                                     </span>
                                 </div>
                             </div>
@@ -596,7 +557,7 @@ export function CodexCredentialsPage() {
             )}
 
             {/* 使用统计图表 */}
-            {credentialItems.length > 0 && (
+            {chartData.labels.length > 0 && (
                 <div className={styles.chartSection}>
                     <div className={styles.chartHeader}>
                         <h2 className={styles.chartTitle}>{t('codex_credentials.chart_title')}</h2>
