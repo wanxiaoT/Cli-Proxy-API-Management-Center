@@ -1236,6 +1236,12 @@
     "modified_time": "修改时间",
     "chart_title": "使用统计",
     "chart_success": "成功请求",
-    "chart_failure": "失败请求"
+    "chart_failure": "失败请求",
+    "check_quota": "查询配额",
+    "delete_invalid": "清理无效凭证",
+    "delete_invalid_confirm": "确定要删除所有返回 403 错误（已失效）的无效凭证吗？该操作不可恢复。",
+    "delete_invalid_loading": "正在检测并清理无效凭证...",
+    "delete_invalid_summary": "清理完成：共删除 {{count}} 个无效凭证。",
+    "nothing_to_delete": "未发现无效凭证。"
   }
 }

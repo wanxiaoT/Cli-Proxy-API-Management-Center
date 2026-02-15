@@ -36,6 +36,11 @@ import type { AuthFileItem } from '@/types';
 import type { KeyStats } from '@/utils/usage';
 import { collectUsageDetails, type UsageDetail } from '@/utils/usage';
 import { formatFileSize } from '@/utils/format';
+import {
+    CODEX_CONFIG,
+    useQuotaLoader,
+} from '@/components/quota';
+import { QuotaProgressBar } from '@/components/quota/QuotaCard';
 import styles from './CodexCredentialsPage.module.scss';
 
 ChartJS.register(CategoryScale, LinearScale, BarElement, Title, Tooltip, Legend);
@@ -54,6 +59,7 @@ export function CodexCredentialsPage() {
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
     const [saving, setSaving] = useState(false);
+    const [cleanupLoading, setCleanupLoading] = useState(false);
     const hasMounted = useRef(false);
 
     // 使用统计
@@ -66,6 +72,10 @@ export function CodexCredentialsPage() {
 
     // 批量选择
     const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
+
+    // 配额加载逻辑
+    const { quota, loadQuota } = useQuotaLoader(CODEX_CONFIG);
+    const [quotaLoading, setQuotaLoading] = useState(false);
 
     // 加载认证文件列表（只保留 codex 类型）
     const loadFiles = useCallback(async () => {
@@ -210,6 +220,73 @@ export function CodexCredentialsPage() {
         },
         [files, disableControls, saving, showNotification, t]
     );
+
+    // 查询配额
+    const handleCheckQuota = useCallback(async () => {
+        if (disableControls || quotaLoading || !files.length) return;
+        setQuotaLoading(true);
+        try {
+            await loadQuota(files, 'all', (l) => setQuotaLoading(l));
+        } finally {
+            setQuotaLoading(false);
+        }
+    }, [files, disableControls, quotaLoading, loadQuota]);
+
+    // 一键清理无效凭证 (HTTP 403)
+    const handleCleanupInvalid = useCallback(async () => {
+        if (disableControls || cleanupLoading || !files.length) return;
+        if (!window.confirm(t('codex_credentials.delete_invalid_confirm'))) return;
+
+        setCleanupLoading(true);
+        let deletedCount = 0;
+        const failedChecks: string[] = [];
+
+        try {
+            // 先并发检查所有凭证
+            const results = await Promise.all(
+                files.map(async (file) => {
+                    try {
+                        await CODEX_CONFIG.fetchQuota(file, t);
+                        return { name: file.name, invalid: false };
+                    } catch (err: any) {
+                        // 403 代表凭证明确失效
+                        const isInvalid = err.status === 403 || (err.message && err.message.includes('403'));
+                        return { name: file.name, invalid: isInvalid };
+                    }
+                })
+            );
+
+            const invalidFiles = results.filter(r => r.invalid).map(r => r.name);
+
+            if (invalidFiles.length === 0) {
+                showNotification(t('codex_credentials.nothing_to_delete'), 'info');
+                return;
+            }
+
+            // 批量删除
+            for (const name of invalidFiles) {
+                try {
+                    await authFilesApi.deleteFile(name);
+                    deletedCount++;
+                } catch {
+                    failedChecks.push(name);
+                }
+            }
+
+            showNotification(
+                t('codex_credentials.delete_invalid_summary', { count: deletedCount }),
+                'success'
+            );
+
+            if (deletedCount > 0) {
+                void loadFiles();
+            }
+        } catch (err: any) {
+            showNotification(err.message || t('notification.update_failed'), 'error');
+        } finally {
+            setCleanupLoading(false);
+        }
+    }, [files, disableControls, cleanupLoading, t, showNotification, loadFiles]);
 
     // 批量启用/禁用
     const batchToggle = useCallback(
@@ -424,6 +501,24 @@ export function CodexCredentialsPage() {
                 </div>
 
                 <div className={styles.batchActions}>
+                    <Button
+                        variant="primary"
+                        size="sm"
+                        onClick={handleCheckQuota}
+                        loading={quotaLoading}
+                        disabled={disableControls || !files.length}
+                    >
+                        {t('codex_credentials.check_quota')}
+                    </Button>
+                    <Button
+                        variant="secondary"
+                        size="sm"
+                        onClick={handleCleanupInvalid}
+                        loading={cleanupLoading}
+                        disabled={disableControls || !files.length}
+                    >
+                        {t('codex_credentials.delete_invalid')}
+                    </Button>
                     {filteredItems.length > 0 && (
                         <Button
                             variant="secondary"
@@ -550,6 +645,17 @@ export function CodexCredentialsPage() {
                                         {t('codex_credentials.chart_failure')}: {stats.failure}
                                     </span>
                                 </div>
+
+                                {/* 配额展示区域 */}
+                                {quota[item.name] && (
+                                    <div className={styles.quotaArea}>
+                                        {CODEX_CONFIG.renderQuotaItems(
+                                            quota[item.name],
+                                            t,
+                                            { styles: styles as any, QuotaProgressBar }
+                                        )}
+                                    </div>
+                                )}
                             </div>
                         );
                     })}
