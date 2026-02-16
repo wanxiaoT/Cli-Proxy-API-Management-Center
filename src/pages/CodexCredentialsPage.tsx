@@ -14,11 +14,12 @@ import {
     CategoryScale,
     LinearScale,
     BarElement,
+    ArcElement,
     Title,
     Tooltip,
     Legend,
 } from 'chart.js';
-import { Bar } from 'react-chartjs-2';
+import { Bar, Doughnut } from 'react-chartjs-2';
 import { Button } from '@/components/ui/Button';
 import { Select } from '@/components/ui/Select';
 import { ToggleSwitch } from '@/components/ui/ToggleSwitch';
@@ -30,6 +31,7 @@ import { usageApi } from '@/services/api';
 import {
     useAuthStore,
     useNotificationStore,
+    useQuotaStore,
     useThemeStore,
 } from '@/stores';
 import type { AuthFileItem } from '@/types';
@@ -41,9 +43,11 @@ import {
     useQuotaLoader,
 } from '@/components/quota';
 import { QuotaProgressBar } from '@/components/quota/QuotaCard';
+import type { QuotaStatusState } from '@/components/quota/QuotaCard';
+import { getStatusFromError } from '@/utils/quota';
 import styles from './CodexCredentialsPage.module.scss';
 
-ChartJS.register(CategoryScale, LinearScale, BarElement, Title, Tooltip, Legend);
+ChartJS.register(CategoryScale, LinearScale, BarElement, ArcElement, Title, Tooltip, Legend);
 
 type StatusFilter = 'all' | 'active' | 'disabled';
 
@@ -76,6 +80,30 @@ export function CodexCredentialsPage() {
     // 配额加载逻辑
     const { quota, loadQuota } = useQuotaLoader(CODEX_CONFIG);
     const [quotaLoading, setQuotaLoading] = useState(false);
+    const setCodexQuota = useQuotaStore((state) => state.setCodexQuota);
+
+    // 单个凭证配额刷新
+    const loadSingleQuota = useCallback(async (file: AuthFileItem) => {
+        const name = file.name;
+        setCodexQuota((prev) => ({
+            ...prev,
+            [name]: CODEX_CONFIG.buildLoadingState(),
+        }));
+        try {
+            const data = await CODEX_CONFIG.fetchQuota(file, t);
+            setCodexQuota((prev) => ({
+                ...prev,
+                [name]: CODEX_CONFIG.buildSuccessState(data),
+            }));
+        } catch (err: unknown) {
+            const message = err instanceof Error ? err.message : t('common.unknown_error');
+            const errorStatus = getStatusFromError(err);
+            setCodexQuota((prev) => ({
+                ...prev,
+                [name]: CODEX_CONFIG.buildErrorState(message, errorStatus),
+            }));
+        }
+    }, [setCodexQuota, t]);
 
     // 加载认证文件列表（只保留 codex 类型）
     const loadFiles = useCallback(async () => {
@@ -193,6 +221,26 @@ export function CodexCredentialsPage() {
     const activeCount = files.filter((f: AuthFileItem) => !f.disabled).length;
     const disabledCount = files.filter((f: AuthFileItem) => f.disabled === true).length;
     const totalSuccess = files.reduce((sum: number, f: AuthFileItem) => sum + getFileStats(f).success, 0);
+
+    // 凭证健康统计（基于配额检测结果）
+    const healthStats = useMemo(() => {
+        let alive = 0;
+        let dead = 0;
+        let unchecked = 0;
+        files.forEach((f: AuthFileItem) => {
+            const q = quota[f.name];
+            if (!q || q.status === 'idle') {
+                unchecked++;
+            } else if (q.status === 'success') {
+                alive++;
+            } else if (q.status === 'error') {
+                dead++;
+            } else if (q.status === 'loading') {
+                unchecked++;
+            }
+        });
+        return { alive, dead, unchecked };
+    }, [files, quota]);
 
     // 切换启用/禁用
     const toggleFile = useCallback(
@@ -444,6 +492,67 @@ export function CodexCredentialsPage() {
         [isDark]
     );
 
+    // 凭证健康状态环形图
+    const healthChartData = useMemo(() => ({
+        labels: [
+            t('codex_credentials.health_alive'),
+            t('codex_credentials.health_dead'),
+            t('codex_credentials.health_unchecked'),
+        ],
+        datasets: [{
+            data: [healthStats.alive, healthStats.dead, healthStats.unchecked],
+            backgroundColor: [
+                isDark ? 'rgba(52, 211, 153, 0.8)' : 'rgba(16, 185, 129, 0.8)',
+                isDark ? 'rgba(248, 113, 113, 0.8)' : 'rgba(239, 68, 68, 0.8)',
+                isDark ? 'rgba(156, 163, 175, 0.5)' : 'rgba(209, 213, 219, 0.8)',
+            ],
+            borderColor: [
+                isDark ? '#34d399' : '#10b981',
+                isDark ? '#f87171' : '#ef4444',
+                isDark ? '#6b7280' : '#9ca3af',
+            ],
+            borderWidth: 2,
+            hoverOffset: 6,
+        }],
+    }), [healthStats, isDark, t]);
+
+    const healthChartOptions = useMemo(() => ({
+        responsive: true,
+        maintainAspectRatio: false,
+        cutout: '60%',
+        plugins: {
+            legend: {
+                position: 'bottom' as const,
+                labels: {
+                    color: isDark ? '#d1d5db' : '#4b5563',
+                    font: { size: 13, weight: 500 as const },
+                    usePointStyle: true,
+                    pointStyle: 'circle' as const,
+                    padding: 16,
+                },
+            },
+            tooltip: {
+                backgroundColor: isDark ? '#1f2937' : '#ffffff',
+                titleColor: isDark ? '#f9fafb' : '#111827',
+                bodyColor: isDark ? '#d1d5db' : '#4b5563',
+                borderColor: isDark ? '#374151' : '#e5e7eb',
+                borderWidth: 1,
+                cornerRadius: 8,
+                padding: 10,
+                callbacks: {
+                    label: (ctx: { label?: string; parsed?: number }) => {
+                        const total = healthStats.alive + healthStats.dead + healthStats.unchecked;
+                        const value = ctx.parsed ?? 0;
+                        const pct = total > 0 ? Math.round((value / total) * 100) : 0;
+                        return ` ${ctx.label}: ${value} (${pct}%)`;
+                    },
+                },
+            },
+        },
+    }), [isDark, healthStats]);
+
+    const hasHealthData = healthStats.alive > 0 || healthStats.dead > 0;
+
     return (
         <div className={styles.container}>
             {/* 页面头部 */}
@@ -473,6 +582,35 @@ export function CodexCredentialsPage() {
                     <span className={styles.statValue}>{totalSuccess}</span>
                 </div>
             </div>
+
+            {/* 凭证健康状态 */}
+            {hasHealthData && (
+                <div className={styles.healthSection}>
+                    <div className={styles.healthChart}>
+                        <h2 className={styles.chartTitle}>{t('codex_credentials.health_title')}</h2>
+                        <div className={styles.healthDoughnutWrap}>
+                            <Doughnut data={healthChartData} options={healthChartOptions} />
+                        </div>
+                    </div>
+                    <div className={styles.healthLegend}>
+                        <div className={`${styles.healthLegendItem} ${styles.healthAlive}`}>
+                            <span className={styles.healthDot} />
+                            <span className={styles.healthLegendLabel}>{t('codex_credentials.health_alive')}</span>
+                            <span className={styles.healthLegendValue}>{healthStats.alive}</span>
+                        </div>
+                        <div className={`${styles.healthLegendItem} ${styles.healthDead}`}>
+                            <span className={styles.healthDot} />
+                            <span className={styles.healthLegendLabel}>{t('codex_credentials.health_dead')}</span>
+                            <span className={styles.healthLegendValue}>{healthStats.dead}</span>
+                        </div>
+                        <div className={`${styles.healthLegendItem} ${styles.healthUnchecked}`}>
+                            <span className={styles.healthDot} />
+                            <span className={styles.healthLegendLabel}>{t('codex_credentials.health_unchecked')}</span>
+                            <span className={styles.healthLegendValue}>{healthStats.unchecked}</span>
+                        </div>
+                    </div>
+                </div>
+            )}
 
             {/* 工具栏 */}
             <div className={styles.toolbar}>
@@ -647,15 +785,56 @@ export function CodexCredentialsPage() {
                                 </div>
 
                                 {/* 配额展示区域 */}
-                                {quota[item.name] && (
-                                    <div className={styles.quotaArea}>
-                                        {CODEX_CONFIG.renderQuotaItems(
-                                            quota[item.name],
-                                            t,
-                                            { styles: styles as any, QuotaProgressBar }
-                                        )}
-                                    </div>
-                                )}
+                                <div className={styles.quotaArea}>
+                                    {(() => {
+                                        const q = quota[item.name] as unknown as (QuotaStatusState & Record<string, unknown>) | undefined;
+                                        const status = q?.status ?? 'idle';
+                                        if (status === 'loading') {
+                                            return <div className={styles.quotaMessage}>{t('codex_quota.loading')}</div>;
+                                        }
+                                        if (status === 'error') {
+                                            const errorStatus = q?.errorStatus as number | undefined;
+                                            const errorMsg = errorStatus === 404
+                                                ? t('common.quota_update_required')
+                                                : errorStatus === 403
+                                                    ? t('common.quota_check_credential')
+                                                    : (q?.error as string) || t('common.unknown_error');
+                                            return (
+                                                <div
+                                                    className={styles.quotaClickable}
+                                                    onClick={() => void loadSingleQuota(item)}
+                                                    role="button"
+                                                    tabIndex={0}
+                                                    onKeyDown={(e) => { if (e.key === 'Enter') void loadSingleQuota(item); }}
+                                                >
+                                                    <div className={styles.quotaError}>
+                                                        {t('codex_quota.load_failed', { message: errorMsg })}
+                                                    </div>
+                                                    <div className={styles.quotaRetryHint}>{t('codex_quota.idle')}</div>
+                                                </div>
+                                            );
+                                        }
+                                        if (status === 'success' && q) {
+                                            return CODEX_CONFIG.renderQuotaItems(
+                                                q as any,
+                                                t,
+                                                { styles: styles as any, QuotaProgressBar }
+                                            );
+                                        }
+                                        // idle
+                                        return (
+                                            <div
+                                                className={styles.quotaClickable}
+                                                onClick={() => void loadSingleQuota(item)}
+                                                role="button"
+                                                tabIndex={0}
+                                                onKeyDown={(e) => { if (e.key === 'Enter') void loadSingleQuota(item); }}
+                                            >
+                                                <div className={styles.quotaIdleText}>{t('codex_quota.idle')}</div>
+                                            </div>
+                                        );
+                                    })()}
+                                </div>
                             </div>
                         );
                     })}

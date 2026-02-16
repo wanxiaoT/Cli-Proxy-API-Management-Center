@@ -1236,6 +1236,10 @@
     "modified_time": "Modified",
     "chart_title": "Usage Statistics",
     "chart_success": "Successful Requests",
-    "chart_failure": "Failed Requests"
+    "chart_failure": "Failed Requests",
+    "health_title": "Credential Health",
+    "health_alive": "Alive",
+    "health_dead": "Dead",
+    "health_unchecked": "Unchecked"
   }
 }
